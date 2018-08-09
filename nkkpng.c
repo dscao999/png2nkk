@@ -171,7 +171,7 @@ static inline int min(unsigned int x, unsigned int y)
 }
 
 struct cmdparam {
-	const char *png_in, *png_out;
+	const char *png_in, *png_out, *ssd;
 	int cx, cy, width, height;
 };
 
@@ -264,6 +264,12 @@ static const struct option l_opts[] = {
 		.flag = NULL,
 		.val = 'o'
 	},
+	{
+		.name = "ssd",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 's'
+	},
 	{	.name = NULL	}
 };
 
@@ -275,7 +281,7 @@ static int parse_cmdline(int argc, char *argv[], struct cmdparam *cmdarg)
 
 	opterr = 0;
 	do {
-		opt = getopt_long(argc, argv, ":x:y:w:h:p:o:", l_opts, &argpos);
+		opt = getopt_long(argc, argv, ":x:s:y:w:h:p:o:", l_opts, &argpos);
 		switch(opt) {
 		case -1:
 			fin = 1;
@@ -297,6 +303,9 @@ static int parse_cmdline(int argc, char *argv[], struct cmdparam *cmdarg)
 			break;
 		case 'o':
 			cmdarg->png_out = optarg;
+			break;
+		case 's':
+			cmdarg->ssd = optarg;
 			break;
 		case '?':
 			fprintf(stderr, "Unknown option: %c\n", optopt);
@@ -321,21 +330,38 @@ static int parse_cmdline(int argc, char *argv[], struct cmdparam *cmdarg)
 		fprintf(stderr, "Invalied file: %s\n", cmdarg->png_in);
 		return 104;
 	}
-	if (stat(cmdarg->png_out, &fs) == -1 ||
-		!S_ISREG(fs.st_mode) || !(fs.st_mode & S_IWUSR)) {
-		fprintf(stderr, "Invalied file: %s\n", cmdarg->png_out);
-		return 108;
-	}
 	return retv;
+}
+
+static unsigned short rgb2ssd(const unsigned char *rgb)
+{
+	static const double rb_ratio = 31.0/255.0, g_ratio = 63.0/255.0;
+	unsigned int r, g, b, rs, gs, bs;
+	double rd, gd, bd;
+
+	r = *rgb;
+	g = *(rgb+1);
+	b = *(rgb+2);
+
+	rd = r*rb_ratio;
+	gd = g*g_ratio;
+	bd = b*rb_ratio;
+
+	rs = rd;
+	gs = gd;
+	bs = bd;
+
+	return ((rs & 0x1f) << 11) | ((gs & 0x3f) << 5) | (bs & 0x1f);
 }
 
 int main(int argc, char *argv[])
 {
-	int retv = 0;
+	int retv = 0, i, j;
 	FILE *fin, *fout;
-	unsigned char buf[64];
+	unsigned char buf[64], *cpix;
 	struct pngimage pim;
 	struct cmdparam cmdl;
+	unsigned short *ssd, *c_ssd;
 
 	cmdl.width = 640;
 	cmdl.height = 480;
@@ -343,6 +369,7 @@ int main(int argc, char *argv[])
 	cmdl.cy = 200;
 	cmdl.png_in = NULL;
 	cmdl.png_out = NULL;
+	cmdl.ssd = NULL;
 	retv = parse_cmdline(argc, argv, &cmdl);
 	if (retv)
 		return retv;
@@ -368,7 +395,12 @@ int main(int argc, char *argv[])
 	fclose(fin);
 	fin = NULL;
 
-	crop_image(&cmdl, &pim);
+	if ((retv = crop_image(&cmdl, &pim))) {
+		fprintf(stderr, "Cannot crop image to: cx: %d, cy: %d, "
+				"width: %d, height: %d\n", cmdl.cx, cmdl.cy,
+				cmdl.width, cmdl.height);
+		goto exit_20;
+	};
 
 	fout = fopen(cmdl.png_out, "wb");
 	if (!fout) {
@@ -379,6 +411,35 @@ int main(int argc, char *argv[])
 	}
 	png_write(fout, &pim);
 	fclose(fout);
+	fout = NULL;
+
+	if (PIXBYTE(pim.bitdepth) == 3 && cmdl.ssd) {
+		ssd = malloc(pim.width*pim.height*sizeof(unsigned short));
+		if (!ssd) {
+			fprintf(stderr, "Out of Memory!\n");
+			retv = 10000;
+			goto exit_20;
+		}
+		cpix = pim.area;
+		c_ssd = ssd;
+		for (i = 0; i < pim.height; i++) {
+			for (j = 0; j < pim.width; j++) {
+				*c_ssd = rgb2ssd(cpix);
+				cpix += 3;
+				c_ssd++;
+			}
+		}
+		fout = fopen(cmdl.ssd, "wb");
+		if (!fout) {
+			fprintf(stderr, "Cannot open file: %s\n", cmdl.ssd);
+			free(ssd);
+			retv = 104;
+			goto exit_20;
+		}
+		fwrite(ssd, sizeof(unsigned short), pim.height*pim.width, fout);
+		fclose(fout);
+		free(ssd);
+	}
 
 exit_20:
 	if (pim.alloc) {
