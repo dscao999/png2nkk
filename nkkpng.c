@@ -3,13 +3,19 @@
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
+#include <getopt.h>
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <assert.h>
 
 #define PIXBYTE(bitdepth) (3*((bitdepth-1)/8+1))
 
 struct pngimage {
 	png_uint_32 height, width;
 	int bitdepth, colortyp;
+	unsigned char *area;
 	png_bytep *rows;
 	int alloc;
 };
@@ -31,9 +37,9 @@ static int png_read(FILE *fi, struct pngimage *im)
 	png_structp png;
 	png_infop pnginfo, endinfo;
 	int interlace_type, comp_type, filter_method;
-	char *draw;
-	png_bytep *c_row;
-	int i, pixbytes, stripe;
+	unsigned char *draw, *cline;
+	unsigned char **c_row;
+	int i, pixbytes;
 
 	im->alloc = 0;
 	png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
@@ -71,6 +77,7 @@ static int png_read(FILE *fi, struct pngimage *im)
 	png_get_IHDR(png, pnginfo, &im->width, &im->height, &im->bitdepth,
 		&im->colortyp, &interlace_type, &comp_type, &filter_method);
 
+	printf("Pixcel bit depth: %d\n", im->bitdepth);
 	pixbytes = PIXBYTE(im->bitdepth);
 	draw = mmap(NULL, im->width*im->height*pixbytes, PROT_READ|PROT_WRITE,
 		MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
@@ -79,6 +86,7 @@ static int png_read(FILE *fi, struct pngimage *im)
 		retv = 10000;
 		goto exit_16;
 	}
+	im->area = draw;
 	im->rows = malloc(im->height*sizeof(png_bytep *));
 	if (!im->rows) {
 		fprintf(stderr, "Out of Memory!\n");
@@ -86,10 +94,10 @@ static int png_read(FILE *fi, struct pngimage *im)
 		goto exit_18;
 	}
 	im->alloc = 1;
-	stripe = 0;
+	cline = draw;
 	for (c_row = im->rows, i = 0; i < im->height; i++, c_row++) {
-		*c_row = (png_bytep)(draw + stripe);
-		stripe += im->width*pixbytes;
+		*c_row = cline;
+		cline += im->width*pixbytes;
 	}
 	
 	printf("Reading Image:   ");
@@ -154,18 +162,192 @@ exit_10:
 	return retv;
 }
 
+static inline int min(unsigned int x, unsigned int y)
+{
+	if (x < y)
+		return x;
+	else
+		return y;
+}
+
+struct cmdparam {
+	const char *png_in, *png_out;
+	int cx, cy, width, height;
+};
+
+static int crop_image(struct cmdparam *crop, struct pngimage *im)
+{
+	int retv = 0;
+	int pixbytes;
+	unsigned char *area;
+	png_bytep *rows;
+	unsigned char **crow, *cline, *oline;
+	int i;
+
+	if (crop->cx + crop->width + 48 > im->width)
+		return 100;
+	if (crop->cy + crop->height + 32 > im->height)
+		return 100;
+	crop->width = min(im->width - crop->cx, crop->width);
+	crop->height = min(im->height - crop->cy, crop->height);
+
+	pixbytes = PIXBYTE(im->bitdepth);
+	area = mmap(NULL, crop->width*crop->height*pixbytes,
+		PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if (!area) {
+		fprintf(stderr, "Out of Memory!\n");
+		return 10000;
+	}
+	rows = malloc(crop->height*sizeof(png_bytep *));
+	if (!rows) {
+		fprintf(stderr, "Out of Memory!\n");
+		retv = 10000;
+		goto exit_10;
+	}
+
+	cline = area;
+	oline = im->area + im->width*pixbytes*crop->cy;
+	for (crow = rows, i = 0; i < crop->height; i++, crow++) {
+		*crow = cline;
+		memcpy(cline, oline+crop->cx*pixbytes, crop->width*pixbytes);
+		cline += crop->width * pixbytes;
+		oline += im->width * pixbytes;
+	}
+	munmap(im->area, im->width*im->height*pixbytes);
+	free(im->rows);
+	im->area = area;
+	im->rows = rows;
+	im->width = crop->width;
+	im->height = crop->height;
+
+	return retv;
+
+exit_10:
+	munmap(area, crop->width*crop->height*pixbytes);
+	return retv;
+}
+
+static const struct option l_opts[] = {
+	{
+		.name = "cx",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'x'
+	},
+	{
+		.name = "cy",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'y'
+	},
+	{
+		.name = "width",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'w'
+	},
+	{
+		.name = "height",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'h'
+	},
+	{
+		.name = "png",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'p'
+	},
+	{
+		.name = "out",
+		.has_arg = required_argument,
+		.flag = NULL,
+		.val = 'o'
+	},
+	{	.name = NULL	}
+};
+
+static int parse_cmdline(int argc, char *argv[], struct cmdparam *cmdarg)
+{
+	int opt, fin = 0, argpos, retv = 0;
+	struct stat fs;
+	extern int opterr, optopt;
+
+	opterr = 0;
+	do {
+		opt = getopt_long(argc, argv, ":x:y:w:h:p:o:", l_opts, &argpos);
+		switch(opt) {
+		case -1:
+			fin = 1;
+			break;
+		case 'x':
+			cmdarg->cx = atoi(optarg);
+			break;
+		case 'y':
+			cmdarg->cy = atoi(optarg);
+			break;
+		case 'w':
+			cmdarg->width = atoi(optarg);
+			break;
+		case 'h':
+			cmdarg->height = atoi(optarg);
+			break;
+		case 'p':
+			cmdarg->png_in = optarg;
+			break;
+		case 'o':
+			cmdarg->png_out = optarg;
+			break;
+		case '?':
+			fprintf(stderr, "Unknown option: %c\n", optopt);
+			retv = 110;
+			break;
+		case ':':
+			fprintf(stderr, "Missing arguments: %c\n", optopt);
+			retv = 114;
+			break;
+		default:
+			fprintf(stderr, "Unprocessed options!\n");
+			retv = 118;
+			assert(0);
+		}
+	} while (fin != 1);
+	if (!cmdarg->png_in || !cmdarg->png_out) {
+		fprintf(stderr, "Input and/or Output file name missing!\n");
+		return 112;
+	}
+	if (stat(cmdarg->png_in, &fs) == -1 ||
+		!S_ISREG(fs.st_mode) || !(fs.st_mode & S_IRUSR)) {
+		fprintf(stderr, "Invalied file: %s\n", cmdarg->png_in);
+		return 104;
+	}
+	if (stat(cmdarg->png_out, &fs) == -1 ||
+		!S_ISREG(fs.st_mode) || !(fs.st_mode & S_IWUSR)) {
+		fprintf(stderr, "Invalied file: %s\n", cmdarg->png_out);
+		return 108;
+	}
+	return retv;
+}
+
 int main(int argc, char *argv[])
 {
 	int retv = 0;
 	FILE *fin, *fout;
 	unsigned char buf[64];
 	struct pngimage pim;
+	struct cmdparam cmdl;
 
-	if (argc < 3) {
-		fprintf(stderr, "Usage: %s input output\n", argv[0]);
-		return 1;
-	}
-	fin = fopen(argv[1], "rb");
+	cmdl.width = 640;
+	cmdl.height = 480;
+	cmdl.cx = 200;
+	cmdl.cy = 200;
+	cmdl.png_in = NULL;
+	cmdl.png_out = NULL;
+	retv = parse_cmdline(argc, argv, &cmdl);
+	if (retv)
+		return retv;
+
+	fin = fopen(cmdl.png_in, "rb");
 	if (!fin) {
 		fprintf (stderr, "Input file \"%s\" error: %s\n", argv[1],
 			strerror(errno));
@@ -186,7 +368,9 @@ int main(int argc, char *argv[])
 	fclose(fin);
 	fin = NULL;
 
-	fout = fopen(argv[2], "wb");
+	crop_image(&cmdl, &pim);
+
+	fout = fopen(cmdl.png_out, "wb");
 	if (!fout) {
 		fprintf(stderr, "Outputfile \"%s\" error: %s\n", argv[2],
 			strerror(errno));
@@ -198,7 +382,7 @@ int main(int argc, char *argv[])
 
 exit_20:
 	if (pim.alloc) {
-		munmap(pim.rows[0], pim.height*pim.width*PIXBYTE(pim.bitdepth));
+		munmap(pim.area, pim.height*pim.width*PIXBYTE(pim.bitdepth));
 		free(pim.rows);
 	}
 
