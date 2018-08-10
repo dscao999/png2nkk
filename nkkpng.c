@@ -363,13 +363,7 @@ int main(int argc, char *argv[])
 	struct cmdparam cmdl;
 	unsigned short *ssd, *c_ssd;
 
-	cmdl.width = 640;
-	cmdl.height = 480;
-	cmdl.cx = 200;
-	cmdl.cy = 200;
-	cmdl.png_in = NULL;
-	cmdl.png_out = NULL;
-	cmdl.ssd = NULL;
+	memset(&cmdl, 0, sizeof(cmdl));
 	retv = parse_cmdline(argc, argv, &cmdl);
 	if (retv)
 		return retv;
@@ -395,11 +389,14 @@ int main(int argc, char *argv[])
 	fclose(fin);
 	fin = NULL;
 
-	if ((retv = crop_image(&cmdl, &pim))) {
-		fprintf(stderr, "Cannot crop image to: cx: %d, cy: %d, "
+	if (cmdl.width != 0 && cmdl.height != 0) {
+		retv = crop_image(&cmdl, &pim);
+		if (retv) {
+			fprintf(stderr, "Cannot crop image to: cx: %d, cy: %d, "
 				"width: %d, height: %d\n", cmdl.cx, cmdl.cy,
 				cmdl.width, cmdl.height);
-		goto exit_20;
+			goto exit_20;
+		}
 	};
 
 	fout = fopen(cmdl.png_out, "wb");

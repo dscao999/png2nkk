@@ -54,3 +54,5 @@ dkms.conf
 # vim files
 .*.swp
 png2nkk
+# picture png directory
+png
