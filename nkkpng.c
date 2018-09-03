@@ -17,7 +17,7 @@ struct pngimage {
 	int bitdepth, colortyp;
 	unsigned char *area;
 	png_bytep *rows;
-	int alloc;
+	int len;
 };
 
 static struct pngimage pim;
@@ -37,11 +37,11 @@ static int png_read(FILE *fi, struct pngimage *im)
 	png_structp png;
 	png_infop pnginfo, endinfo;
 	int interlace_type, comp_type, filter_method;
-	unsigned char *draw, *cline;
+	void *draw;
+	unsigned char *cline;
 	unsigned char **c_row;
-	int i, pixbytes;
+	int i, pixbytes, len0, len1;
 
-	im->alloc = 0;
 	png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
 	if (!png) {
 		fprintf(stderr, "Cannot allocate PNG Structure, Out of Memory!\n");
@@ -79,7 +79,10 @@ static int png_read(FILE *fi, struct pngimage *im)
 
 	printf("Pixcel bit depth: %d\n", im->bitdepth);
 	pixbytes = PIXBYTE(im->bitdepth);
-	draw = mmap(NULL, im->width*im->height*pixbytes, PROT_READ|PROT_WRITE,
+	len0 = im->width*im->height*pixbytes;
+	len1 = im->height*sizeof(png_bytep *);
+	im->len = len0 + len1;
+	draw = mmap(NULL, im->len,  PROT_READ|PROT_WRITE,
 		MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
 	if (!draw) {
 		fprintf(stderr, "Out of Memory!\n");
@@ -87,13 +90,7 @@ static int png_read(FILE *fi, struct pngimage *im)
 		goto exit_16;
 	}
 	im->area = draw;
-	im->rows = malloc(im->height*sizeof(png_bytep *));
-	if (!im->rows) {
-		fprintf(stderr, "Out of Memory!\n");
-		retv = 1000;
-		goto exit_18;
-	}
-	im->alloc = 1;
+	im->rows = draw + im->len;
 	cline = draw;
 	for (c_row = im->rows, i = 0; i < im->height; i++, c_row++) {
 		*c_row = cline;
@@ -109,8 +106,6 @@ static int png_read(FILE *fi, struct pngimage *im)
 
 	return retv;
 	
-exit_18:
-	munmap(draw, (im->width*im->height*pixbytes));
 exit_16:
 	png_destroy_read_struct(&png, &pnginfo, &endinfo);
 	return retv;
@@ -179,10 +174,11 @@ static int crop_image(struct cmdparam *crop, struct pngimage *im)
 {
 	int retv = 0;
 	int pixbytes;
+	void *draw;
 	unsigned char *area;
 	png_bytep *rows;
 	unsigned char **crow, *cline, *oline;
-	int i;
+	int i, len, len0, len1;
 
 	if (crop->cx + crop->width + 48 > im->width)
 		return 100;
@@ -192,18 +188,17 @@ static int crop_image(struct cmdparam *crop, struct pngimage *im)
 	crop->height = min(im->height - crop->cy, crop->height);
 
 	pixbytes = PIXBYTE(im->bitdepth);
-	area = mmap(NULL, crop->width*crop->height*pixbytes,
-		PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-	if (!area) {
+	len0 = crop->width*crop->height*pixbytes;
+	len1 = crop->height*sizeof(png_bytep *);
+	len = len0 + len1;
+	draw = mmap(NULL, len, PROT_READ|PROT_WRITE,
+			MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if (!draw) {
 		fprintf(stderr, "Out of Memory!\n");
 		return 10000;
 	}
-	rows = malloc(crop->height*sizeof(png_bytep *));
-	if (!rows) {
-		fprintf(stderr, "Out of Memory!\n");
-		retv = 10000;
-		goto exit_10;
-	}
+	area = draw;
+	rows = draw + len0;
 
 	cline = area;
 	oline = im->area + im->width*pixbytes*crop->cy;
@@ -213,17 +208,13 @@ static int crop_image(struct cmdparam *crop, struct pngimage *im)
 		cline += crop->width * pixbytes;
 		oline += im->width * pixbytes;
 	}
-	munmap(im->area, im->width*im->height*pixbytes);
-	free(im->rows);
+	munmap(im->area, im->len);
 	im->area = area;
 	im->rows = rows;
 	im->width = crop->width;
 	im->height = crop->height;
+	im->len = len;
 
-	return retv;
-
-exit_10:
-	munmap(area, crop->width*crop->height*pixbytes);
 	return retv;
 }
 
@@ -439,10 +430,7 @@ int main(int argc, char *argv[])
 	}
 
 exit_20:
-	if (pim.alloc) {
-		munmap(pim.area, pim.height*pim.width*PIXBYTE(pim.bitdepth));
-		free(pim.rows);
-	}
+	munmap(pim.area, pim.len);
 
 exit_10:
 	if (fin)
