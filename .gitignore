@@ -55,4 +55,5 @@ dkms.conf
 .*.swp
 png2nkk
 # picture png directory
+core
 png
